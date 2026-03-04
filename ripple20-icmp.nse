@@ -25,10 +25,11 @@ Sample packet:
 ]]
 
 -- @usage
--- nmap -sn -T4 --script ripple20-icmp.nse -e eth0 [--script-args timeout=<secs>]
+-- nmap -sn -T4 --script ripple20-icmp.nse -e eth0 [--script-args timeout=<secs>,retries=<n>]
 --
 -- @args ripple20-icmp.anonymize number should we randomize icmp payload (otherwise we will mark packets with 0xdeadbeef for diagnose purposes - default will anonymize)
--- @args ripple20-icmp.timeout number time to wait for icmp packets (default 3 secs)
+-- @args ripple20-icmp.timeout number total time budget (in secs) to wait for icmp packets across retries (default 3 secs)
+-- @args ripple20-icmp.retries number how many probe attempts to send per host (default 3)
 --
 -- @output
 -- |_ripple20-icmp: Received ICMP MS_SYNC RESP for IP 172.30.16.1 -- possible Treck TCP/IP stack.
@@ -64,13 +65,25 @@ action = function(host)
 
 	local anon = tonumber(stdnse.get_script_args(SCRIPT_NAME .. ".anonymize")) or 1
 	local timeout = tonumber(stdnse.get_script_args(SCRIPT_NAME .. ".timeout")) or pTimeout
+	local retries = tonumber(stdnse.get_script_args(SCRIPT_NAME .. ".retries")) or 3
 	timeout = timeout * 1000
+	if (retries < 1) then retries = 1 end
+	local perTryTimeout = math.floor(timeout / retries)
+	if (perTryTimeout < 300) then perTryTimeout = 300 end
 
 	local iInfo, output = nmap.get_interface_info(host.interface), nil
+	if (iInfo == nil) then
+		return false
+	end
+	local routed = (host.mac_addr == nil)
 	local icmp = packet.Packet:new()
 
-	icmp.mac_src = iInfo.mac_addr
-	icmp.mac_dst = host.mac_addr
+	if (iInfo.mac_addr ~= nil) then
+		icmp.mac_src = iInfo.mac_addr
+	end
+	if (host.mac_addr ~= nil) then
+		icmp.mac_dst = host.mac_addr
+	end
 	icmp.ip_p = 1 -- IPPROTO_ICMP
 	icmp.ip_bin_src = ipOps.ip_to_str(iInfo.address)
 	icmp.ip_bin_dst = ipOps.ip_to_str(host.ip)
@@ -92,19 +105,32 @@ action = function(host)
 	dnet:ip_open()
 
 	local pcap = nmap.new_socket()
-	pcap:set_timeout(timeout)
-	stdnse.print_debug ( 1, "(timeout %d) -> (%s) filter: %s", timeout, iInfo.device, string.format ( "icmp and src %s", host.ip))
-	pcap:pcap_open ( iInfo.device, 104, false, string.format ( "icmp and src %s", host.ip))
+	pcap:set_timeout(perTryTimeout)
+	local pcapFilter = string.format("icmp and src %s and icmp[0] = %d", host.ip, ICMP_MS_SYNC_RESP)
+	stdnse.print_debug ( 1, "(timeout %d / retries %d) -> (%s) filter: %s", perTryTimeout, retries, iInfo.device, pcapFilter)
+	pcap:pcap_open ( iInfo.device, 104, false, pcapFilter)
+	if (routed) then
+		stdnse.print_debug ( 1, "Target %s appears routed/non-local (host.mac_addr unavailable). Reliability may be reduced.", host.ip)
+	end
 
-	dnet:ip_send ( icmp.buf, host)
-	local status, len, _, respdata, _ = pcap:pcap_receive()	
-
-	if ( status) then	
-		local response = packet.Packet:new ( respdata, len, false)
-		if ( response:ip_parse() and response:icmp_parse() and response.icmp_type == ICMP_MS_SYNC_RESP) then
-			stdnse.print_debug ( 1, "Found ----> IP %s | ICMP Type %d", response.ip_src, response.icmp_type)
-			output = string.format ( "Received ICMP MS_SYNC RESP for IP %s -- possible Treck TCP/IP stack.", host.ip)
+	for attempt=1,retries do
+		dnet:ip_send ( icmp.buf, host)
+		local status, len, _, respdata, _ = pcap:pcap_receive()
+		if ( status) then
+			local response = packet.Packet:new ( respdata, len, false)
+			if ( response:ip_parse() and response:icmp_parse() and response.icmp_type == ICMP_MS_SYNC_RESP) then
+				stdnse.print_debug ( 1, "Found ----> IP %s | ICMP Type %d", response.ip_src, response.icmp_type)
+				output = string.format ( "Received ICMP MS_SYNC RESP for IP %s -- possible Treck TCP/IP stack.", host.ip)
+				break
+			end
 		end
+		if (attempt < retries) then
+			stdnse.sleep(0.1)
+		end
+	end
+
+	if (output == nil and routed) then
+		output = string.format("No ICMP MS_SYNC RESP for IP %s. Inconclusive on routed/non-local target.", host.ip)
 	end
 
 	pcap:pcap_close()
