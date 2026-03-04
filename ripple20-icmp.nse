@@ -25,9 +25,9 @@ Sample packet:
 ]]
 
 -- @usage
--- nmap [--anonymize <1|0>] [--timeout <secs>]
+-- nmap -sn -T4 --script ripple20-icmp.nse -e eth0 [--script-args timeout=<secs>]
 --
--- @args ripple20-icmp.anonymize number should we randomize icmp payload (otherwise we will mark packets with 0xdeadbeef for diagnose purposes - default will not anonymize)
+-- @args ripple20-icmp.anonymize number should we randomize icmp payload (otherwise we will mark packets with 0xdeadbeef for diagnose purposes - default will anonymize)
 -- @args ripple20-icmp.timeout number time to wait for icmp packets (default 3 secs)
 --
 -- @output
@@ -62,7 +62,7 @@ action = function(host)
 		return false
 	end
 
-	local anon = tonumber(stdnse.get_script_args(SCRIPT_NAME .. ".anonymize")) or 0
+	local anon = tonumber(stdnse.get_script_args(SCRIPT_NAME .. ".anonymize")) or 1
 	local timeout = tonumber(stdnse.get_script_args(SCRIPT_NAME .. ".timeout")) or pTimeout
 	timeout = timeout * 1000
 
